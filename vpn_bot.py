@@ -97,8 +97,7 @@ async def auto_cleanup_expired_keys():
 # --- Команды ---
 @bot.message_handler(commands=["start", "help"])
 def send_welcome(message):
-    bot.send_message(message.chat.id, "Добро пожаловать! Используйте /buy для покупки VPN.
-Ваш личный кабинет: /myvpn")
+    bot.send_message(message.chat.id, "Добро пожаловать! Используйте /buy для покупки VPN. Ваш личный кабинет: /myvpn")
 
 @bot.message_handler(commands=["buy"])
 def buy_key(message):
