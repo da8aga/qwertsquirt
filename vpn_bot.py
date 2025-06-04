@@ -64,9 +64,12 @@ def handle_myvpn(message):
     if not user:
         bot.send_message(message.chat.id, "У вас пока нет активной подписки.")
         return
-    text = f"🌍 Сервер: {user['server']}
-🔗 Ссылка: `{user['access_url']}`
-⏳ До: {user['subscription']}"
+
+    text = (
+        f"🌍 Сервер: {user['server']}\n"
+        f"🔗 Ссылка: `{user['access_url']}`\n"
+        f"⏳ До: {user['subscription']}`"
+    )
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 # --- Автоудаление просроченных подписок ---
