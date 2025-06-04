@@ -116,9 +116,14 @@ def handle_location_selection(call):
     markup = telebot.types.InlineKeyboardMarkup()
     fake_pay_url = "https://yoomoney.ru"  # Временно фейковая ссылка
     markup.add(telebot.types.InlineKeyboardButton("💳 Оплатить", url=fake_pay_url))
-    bot.send_message(chat_id, f"Вы выбрали регион: {location}
-Цена: {PRICE_RUB}₽
-Нажмите кнопку ниже для оплаты:", reply_markup=markup)
+
+    message_text = (
+        f"Вы выбрали регион: {location}\n"
+        f"💰 Цена: {PRICE_RUB}₽\n"
+        "Нажмите кнопку ниже для оплаты:"
+    )
+    bot.send_message(chat_id, message_text, reply_markup=markup)
+
 
     # В реальной интеграции здесь должен быть redirect_url от платёжной системы
 
