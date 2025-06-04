@@ -5,7 +5,7 @@ import time
 import subprocess
 
 # --- Конфигурация ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN") or "ВАШ_ТОКЕН_ТУТ"
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "7395071177:AAGGRZ2XX4Ornb6h9ESAXvOfsc7WdjFuAPA"
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # --- База данных ---
@@ -24,8 +24,8 @@ def save_data(data):
 
 # --- Тарифы ---
 TARIFFS = {
-    "Базовый": {"price": 5, "duration_days": 7, "locations": ["Германия", "США"]},
-    "Премиум": {"price": 10, "duration_days": 30, "locations": ["Германия", "США", "Сингапур"]}
+    "Неделя": {"price": 5, "duration_days": 7, "locations": ["Амстердам"]},
+    "Месяц": {"price": 10, "duration_days": 30, "locations": ["Амстердам"]}
 }
 
 # --- Генерация ключа Outline ---
