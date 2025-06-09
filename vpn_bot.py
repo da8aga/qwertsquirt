@@ -85,8 +85,9 @@ def handle_location_selection(call):
     location = call.data.split("_")[1]
     chat_id = call.message.chat.id
 
+    # Показываем кнопку оплаты
     markup = telebot.types.InlineKeyboardMarkup()
-    pay_url = "https://yoomoney.ru"
+    pay_url = "https://yoomoney.ru"  # временная ссылка
     markup.add(telebot.types.InlineKeyboardButton("💳 Оплатить", url=pay_url))
 
     message_text = (
@@ -96,10 +97,20 @@ def handle_location_selection(call):
     )
     bot.send_message(chat_id, message_text, reply_markup=markup)
 
+    # Записываем заявку в таблицу payments
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO payments (chat_id, plan, amount, server) VALUES (?, ?, ?, ?)",
               (str(chat_id), "Месяц", PRICE_RUB, location))
+    conn.commit()
+    conn.close()
+
+    # ✅ Создаём запись в таблице users, если её ещё нет
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT chat_id FROM users WHERE chat_id=?", (str(chat_id),))
+    if not c.fetchone():
+        c.execute("INSERT INTO users (chat_id) VALUES (?)", (str(chat_id),))
     conn.commit()
     conn.close()
 
