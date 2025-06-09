@@ -1,121 +1,94 @@
-import telebot
+
 import os
-import json
-import time
+import sqlite3
+import telebot
+import requests
 import asyncio
 from datetime import datetime, timedelta
-import requests
 
-# --- Конфигурация ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))
-PRICE_RUB = 199  # цена подписки в рублях
+PRICE_RUB = 199
+DB_PATH = "vpn_bot.db"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- Работа с файлами ---
-def load_data():
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT UNIQUE,
+            subscription TEXT,
+            access_url TEXT,
+            server TEXT,
+            reminder_sent BOOLEAN DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT,
+            plan TEXT,
+            amount INTEGER,
+            paid BOOLEAN DEFAULT 0,
+            server TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS servers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            location TEXT UNIQUE,
+            api_url TEXT
+        );
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def create_outline_key(api_url):
     try:
-        with open("data.json", "r") as f:
-            return json.load(f)
-    except:
-        return {"servers": {}, "users": {}, "pending_payments": {}}
-
-def save_data(data):
-    with open("data.json", "w") as f:
-        json.dump(data, f, indent=2)
-
-# --- Создание ключа Outline через HTTP ---
-def create_outline_key(location):
-    data = load_data()
-    server = data["servers"].get(location)
-    if not server:
-        print(f"❌ Сервер {location} не найден.")
-        return None
-
-    api_url = server["outline_api_url"].rstrip("/")
-    try:
-        requests.post(f"{api_url}/access-keys", verify=False, timeout=10)
-        keys = requests.get(f"{api_url}/access-keys", verify=False, timeout=10).json()
-        if isinstance(keys, list) and keys:
-            return keys[-1]["accessUrl"]
-        return None
+        response = requests.post(f"{api_url}/access-keys", timeout=10)
+        response.raise_for_status()
+        key_data = response.json()
+        return key_data.get("accessUrl", "")
     except Exception as e:
-        print(f"❌ Ошибка Outline: {e}")
+        print("Ошибка создания ключа:", e)
         return None
 
-# --- Привязка ключа к пользователю ---
-def add_user_subscription(chat_id, access_url, server_name, duration_days=7):
-    data = load_data()
-    data["users"][str(chat_id)] = {
-        "subscription": (datetime.utcnow() + timedelta(days=duration_days)).strftime("%Y-%m-%d"),
-        "access_url": access_url,
-        "server": server_name,
-        "reminder_sent": False
-    }
-    save_data(data)
-
-# --- Команда /myvpn ---
-@bot.message_handler(commands=["myvpn"])
-def handle_myvpn(message):
-    chat_id = str(message.chat.id)
-    data = load_data()
-    user = data["users"].get(chat_id)
-    if not user:
-        bot.send_message(message.chat.id, "У вас пока нет активной подписки.")
-        return
-
-    text = (
-        f"🌍 Сервер: {user['server']}\n"
-        f"🔗 Ссылка: `{user['access_url']}`\n"
-        f"⏳ До: {user['subscription']}`"
-    )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
-# --- Автоудаление просроченных подписок ---
-async def auto_cleanup_expired_keys():
-    while True:
-        data = load_data()
-        now = datetime.utcnow().date()
-        changed = False
-        for chat_id, user in list(data["users"].items()):
-            try:
-                sub_date = datetime.strptime(user["subscription"], "%Y-%m-%d").date()
-                if sub_date < now:
-                    api_url = data["servers"][user["server"]]["outline_api_url"].rstrip("/")
-                    if "access-keys/" in user["access_url"]:
-                        key_id = user["access_url"].split("access-keys/")[-1]
-                        requests.delete(f"{api_url}/access-keys/{key_id}", verify=False)
-                    del data["users"][chat_id]
-                    changed = True
-            except:
-                continue
-        if changed:
-            save_data(data)
-        await asyncio.sleep(3600)
-
-# --- Команды ---
 @bot.message_handler(commands=["start", "help"])
 def send_welcome(message):
     bot.send_message(message.chat.id, "Добро пожаловать! Используйте /buy для покупки VPN. Ваш личный кабинет: /myvpn")
 
 @bot.message_handler(commands=["buy"])
-def buy_key(message):
-    data = load_data()
-    markup = telebot.types.InlineKeyboardMarkup()
-    for location in data.get("servers", {}).keys():
-        markup.add(telebot.types.InlineKeyboardButton(location, callback_data=f"buy_{location}"))
-    bot.send_message(message.chat.id, f"Выберите регион. Стоимость подписки: {PRICE_RUB}₽", reply_markup=markup)
+def handle_buy(message):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT location FROM servers")
+    locations = c.fetchall()
+    conn.close()
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
+    if not locations:
+        bot.send_message(message.chat.id, "Сервера временно недоступны. Попробуйте позже.")
+        return
+
+    markup = telebot.types.InlineKeyboardMarkup()
+    for loc in locations:
+        markup.add(telebot.types.InlineKeyboardButton(f"{loc[0]}", callback_data=f"region_{loc[0]}"))
+    bot.send_message(message.chat.id, "Выберите регион сервера:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("region_"))
 def handle_location_selection(call):
     location = call.data.split("_")[1]
     chat_id = call.message.chat.id
 
-    # Здесь заглушка под оплату
     markup = telebot.types.InlineKeyboardMarkup()
-    fake_pay_url = "https://yoomoney.ru"  # Временно фейковая ссылка
-    markup.add(telebot.types.InlineKeyboardButton("💳 Оплатить", url=fake_pay_url))
+    pay_url = "https://yoomoney.ru"
+    markup.add(telebot.types.InlineKeyboardButton("💳 Оплатить", url=pay_url))
 
     message_text = (
         f"Вы выбрали регион: {location}\n"
@@ -124,12 +97,105 @@ def handle_location_selection(call):
     )
     bot.send_message(chat_id, message_text, reply_markup=markup)
 
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO payments (chat_id, plan, amount, server) VALUES (?, ?, ?, ?)",
+              (str(chat_id), "Месяц", PRICE_RUB, location))
+    conn.commit()
+    conn.close()
 
-    # В реальной интеграции здесь должен быть redirect_url от платёжной системы
+@bot.message_handler(commands=["confirm"])
+def confirm_payment(message):
+    chat_id = str(message.chat.id)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, server FROM payments WHERE chat_id=? AND paid=0 ORDER BY created_at DESC LIMIT 1", (chat_id,))
+    row = c.fetchone()
 
-# --- Запуск ---
+    if not row:
+        bot.send_message(message.chat.id, "Нет неоплаченных заявок.")
+        conn.close()
+        return
+
+    payment_id, location = row
+    c.execute("SELECT api_url FROM servers WHERE location=?", (location,))
+    server_row = c.fetchone()
+
+    if not server_row:
+        bot.send_message(message.chat.id, "Ошибка: не найден сервер для региона.")
+        conn.close()
+        return
+
+    api_url = server_row[0]
+    access_url = create_outline_key(api_url)
+    if not access_url:
+        bot.send_message(message.chat.id, "Ошибка создания ключа. Обратитесь в поддержку.")
+        conn.close()
+        return
+
+    subscription_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+    c.execute("INSERT OR REPLACE INTO users (chat_id, subscription, access_url, server, reminder_sent) VALUES (?, ?, ?, ?, 0)",
+              (chat_id, subscription_date, access_url, location))
+    c.execute("UPDATE payments SET paid=1 WHERE id=?", (payment_id,))
+    conn.commit()
+    conn.close()
+
+    bot.send_message(message.chat.id, f"✅ Оплата подтверждена!\n🔗 Ваш ключ:\n`{access_url}`", parse_mode="Markdown")
+    bot.send_message(ADMIN_CHAT_ID, f"✅ Новый клиент {chat_id}, регион: {location}")
+
+@bot.message_handler(commands=["myvpn"])
+def handle_myvpn(message):
+    chat_id = str(message.chat.id)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT subscription, access_url, server FROM users WHERE chat_id=?", (chat_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        bot.send_message(message.chat.id, "У вас пока нет активной подписки.")
+        return
+
+    subscription, access_url, server = row
+    text = (
+        f"🌍 Сервер: {server}\n"
+        f"🔗 Ссылка: `{access_url}`\n"
+        f"⏳ Подписка до: {subscription}"
+    )
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+async def subscription_checker():
+    while True:
+        now = datetime.now()
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+
+        c.execute("SELECT chat_id, subscription, reminder_sent FROM users WHERE subscription IS NOT NULL")
+        for chat_id, sub_date, reminder_sent in c.fetchall():
+            try:
+                sub_dt = datetime.strptime(sub_date, "%Y-%m-%d")
+                if sub_dt - now <= timedelta(days=2) and not reminder_sent:
+                    bot.send_message(chat_id, f"⏳ Ваша подписка истекает {sub_date}. Продлите её заранее.")
+                    c.execute("UPDATE users SET reminder_sent=1 WHERE chat_id=?", (chat_id,))
+            except:
+                continue
+
+        c.execute("SELECT chat_id, subscription FROM users")
+        for chat_id, sub_date in c.fetchall():
+            try:
+                if datetime.strptime(sub_date, "%Y-%m-%d") < now:
+                    bot.send_message(chat_id, "❌ Ваша подписка завершена. Доступ отключён.")
+                    bot.send_message(ADMIN_CHAT_ID, f"⛔ Клиент {chat_id} удалён (срок истёк).")
+                    c.execute("DELETE FROM users WHERE chat_id=?", (chat_id,))
+            except:
+                continue
+
+        conn.commit()
+        conn.close()
+        await asyncio.sleep(86400)
+
 async def main():
-    asyncio.create_task(auto_cleanup_expired_keys())
+    asyncio.create_task(subscription_checker())
     print("Бот запущен...")
     await bot.polling(non_stop=True)
 
