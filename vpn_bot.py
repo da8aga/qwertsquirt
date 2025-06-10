@@ -51,7 +51,7 @@ init_db()
 
 def create_outline_key(api_url):
     try:
-        response = requests.post(f"{api_url}/access-keys", timeout=10)
+        response = requests.post(f"{api_url}/access-keys", timeout=10, verify=False)  # <- добавлено verify=False
         response.raise_for_status()
         key_data = response.json()
         print("✅ Ключ создан:", key_data, flush=True)
