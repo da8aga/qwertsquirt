@@ -1,12 +1,25 @@
-#!/usr/bin/env python3
+# Сохраняю полный обновлённый код бота в файл для скачивания
+full_code = """#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 import sqlite3
 import telebot
 import requests
 import asyncio
+import logging
 from datetime import datetime, timedelta
+
+# --- Настройка логирования ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s',
+    handlers=[
+        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 # --- Конфигурация ---
 BOT_TOKEN     = os.environ.get("BOT_TOKEN")
@@ -20,6 +33,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # Таблица пользователей
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,6 +46,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Таблица платежей
     c.execute('''
         CREATE TABLE IF NOT EXISTS payments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,6 +59,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Таблица серверов
     c.execute('''
         CREATE TABLE IF NOT EXISTS servers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +67,7 @@ def init_db():
             api_url TEXT
         )
     ''')
+    # Таблица комиссий
     c.execute('''
         CREATE TABLE IF NOT EXISTS commissions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +77,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Таблица заявок на вывод
     c.execute('''
         CREATE TABLE IF NOT EXISTS withdrawals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,20 +91,22 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+    logging.info("✅ База данных и таблицы инициализированы")
 
 init_db()
 
 # --- Вспомогательные функции ---
 
 def create_outline_key(api_url):
+    """Создаёт ключ через Outline API, игнорируя самоподписанный SSL."""
     try:
         r = requests.post(f"{api_url}/access-keys", timeout=10, verify=False)
         r.raise_for_status()
         data = r.json()
-        print("✅ Ключ создан:", data, flush=True)
+        logging.info("✅ Ключ создан: %s", data)
         return data.get("accessUrl", "")
     except Exception as e:
-        print("❌ Ошибка создания ключа:", e, flush=True)
+        logging.error("Ошибка создания ключа: %s", e, exc_info=True)
         return None
 
 def add_user_if_not_exists(chat_id, referrer_id=None):
@@ -96,6 +116,7 @@ def add_user_if_not_exists(chat_id, referrer_id=None):
     if not c.fetchone():
         c.execute("INSERT INTO users (chat_id, referrer_id) VALUES (?, ?)", (chat_id, referrer_id))
         conn.commit()
+        logging.info("Добавлен новый пользователь %s с реферером %s", chat_id, referrer_id)
     conn.close()
 
 def get_balance(chat_id):
@@ -125,12 +146,14 @@ def handle_start(message):
         "Используйте /buy для покупки VPN.\n"
         "Ваш личный кабинет: /myvpn\n"
         "Ваша реферальная ссылка: /referral")
+    logging.info("Обработан /start для %s, referrer=%s", chat_id, ref_id)
 
 @bot.message_handler(commands=["referral"])
 def send_referral(message):
     chat_id = message.chat.id
     link = f"https://t.me/{bot.get_me().username}?start=ref{chat_id}"
     bot.send_message(chat_id, f"🔗 Ваша реферальная ссылка:\n{link}")
+    logging.info("Выдана реферальная ссылка для %s", chat_id)
 
 @bot.message_handler(commands=["buy"])
 def handle_buy(message):
@@ -143,24 +166,26 @@ def handle_buy(message):
 
     if not rows:
         bot.send_message(chat_id, "⚠️ Нет доступных серверов, попробуйте позже.")
+        logging.warning("Нет серверов для /buy у %s", chat_id)
         return
 
     markup = telebot.types.InlineKeyboardMarkup()
     for (loc,) in rows:
         markup.add(telebot.types.InlineKeyboardButton(loc, callback_data=f"region_{loc}"))
     bot.send_message(chat_id, f"📍 Выберите регион VPN (цена {PRICE_RUB}₽):", reply_markup=markup)
+    logging.info("Пользователь %s запросил /buy", chat_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("region_"))
 def handle_region(call):
     loc = call.data.split("_",1)[1]
     chat_id = call.message.chat.id
-
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO payments (chat_id, plan, amount, server) VALUES (?, ?, ?, ?)",
               (str(chat_id), "Месяц", PRICE_RUB, loc))
     conn.commit()
     conn.close()
+    logging.info("Создана заявка на оплату для %s, регион %s", chat_id, loc)
 
     pay_markup = telebot.types.InlineKeyboardMarkup()
     pay_markup.add(telebot.types.InlineKeyboardButton("💳 Оплатить", url="https://yoomoney.ru"))
@@ -178,6 +203,7 @@ def confirm_payment(message):
     row = c.fetchone()
     if not row:
         bot.send_message(chat_id, "❗ Нет неоплаченных заявок.")
+        logging.warning("/confirm: нет заявок для %s", chat_id)
         conn.close()
         return
 
@@ -186,6 +212,7 @@ def confirm_payment(message):
     srv = c.fetchone()
     if not srv:
         bot.send_message(chat_id, "❗ Сервер не найден.")
+        logging.error("/confirm: сервер %s не найден для %s", loc, chat_id)
         conn.close()
         return
     api_url = srv[0]
@@ -211,6 +238,7 @@ def confirm_payment(message):
                   (ref[0], chat_id, comm))
         bot.send_message(int(ref[0]),
                          f"🎉 Ваш реферал {chat_id} оформил подписку! Ваша комиссия: {comm}₽")
+        logging.info("Начислена комиссия %s для %s", comm, ref[0])
 
     conn.commit()
     conn.close()
@@ -220,6 +248,7 @@ def confirm_payment(message):
                      parse_mode="Markdown")
     bot.send_message(ADMIN_CHAT_ID,
                      f"✅ Новый клиент {chat_id}, регион: {loc}")
+    logging.info("Оплата подтверждена для %s", chat_id)
 
 @bot.message_handler(commands=["myvpn"])
 def handle_myvpn(message):
@@ -246,6 +275,7 @@ def handle_balance(message):
                      f"💰 Всего заработано: {total_comm}₽\n"
                      f"💸 Выведено: {total_with}₽\n"
                      f"🟢 Доступно: {avail}₽")
+    logging.info("Проверен баланс для %s: всего=%s, выведено=%s", chat_id, total_comm, total_with)
 
 @bot.message_handler(commands=["withdraw"])
 def handle_withdraw(message):
@@ -273,6 +303,7 @@ def handle_withdraw(message):
     conn.close()
     bot.send_message(message.chat.id,
                      f"✅ Заявка на вывод {amount}₽ принята.\nСчет: {account}")
+    logging.info("Заявка на вывод %s от %s", amount, chat_id)
 
 @bot.message_handler(commands=["keys"])
 def list_keys(message):
@@ -293,12 +324,14 @@ def list_keys(message):
         date = dt.split()[0]
         text += f"• {srv} ({date}): `{url}`\n"
     bot.send_message(chat_id, text, parse_mode="Markdown")
+    logging.info("Выведены ключи для %s", chat_id)
 
 async def subscription_checker():
     while True:
         now = datetime.now()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
+        # напоминания за 2 дня
         c.execute("SELECT chat_id, subscription, reminder_sent FROM users WHERE subscription IS NOT NULL")
         for cid, sub, sent in c.fetchall():
             try:
@@ -308,6 +341,7 @@ async def subscription_checker():
                     c.execute("UPDATE users SET reminder_sent=1 WHERE chat_id=?", (cid,))
             except:
                 pass
+        # удаление истекших
         c.execute("SELECT chat_id, subscription, server FROM users")
         for cid, sub, srv in c.fetchall():
             try:
@@ -323,8 +357,12 @@ async def subscription_checker():
 
 async def main():
     asyncio.create_task(subscription_checker())
-    print("🚀 Бот запущен...")
+    logging.info("🚀 Бот запущен...")
     await bot.polling(non_stop=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
+"""
+with open("/mnt/data/vpn_bot_full.py", "w") as f:
+    f.write(full_code)
+
