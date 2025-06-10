@@ -54,9 +54,10 @@ def create_outline_key(api_url):
         response = requests.post(f"{api_url}/access-keys", timeout=10)
         response.raise_for_status()
         key_data = response.json()
+        print("✅ Ключ создан:", key_data, flush=True)
         return key_data.get("accessUrl", "")
     except Exception as e:
-        print("Ошибка создания ключа:", e)
+        print("❌ Ошибка создания ключа:", e, flush=True)
         return None
 
 @bot.message_handler(commands=["start", "help"])
