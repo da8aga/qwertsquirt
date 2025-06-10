@@ -20,7 +20,6 @@ bot = telebot.TeleBot(BOT_TOKEN)
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Пользователи
     c.execute('''
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,7 +32,6 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     ''')
-    # Платежи
     c.execute('''
     CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +43,6 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     ''')
-    # Серверы (регионы)
     c.execute('''
     CREATE TABLE IF NOT EXISTS servers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +50,6 @@ def init_db():
         api_url TEXT
     );
     ''')
-    # Комиссии рефералов
     c.execute('''
     CREATE TABLE IF NOT EXISTS commissions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +69,6 @@ init_db()
 def create_outline_key(api_url):
     """Создаёт ключ через Outline API, игнорируя self-signed SSL."""
     try:
-        # запрос на создание
         r = requests.post(f"{api_url}/access-keys", timeout=10, verify=False)
         r.raise_for_status()
         data = r.json()
@@ -93,7 +88,7 @@ def add_user_if_not_exists(chat_id, referrer_id=None):
         conn.commit()
     conn.close()
 
-# --- Хендлеры команд ---
+# --- Обработчики команд ---
 
 @bot.message_handler(commands=["start"])
 def handle_start(message):
@@ -120,7 +115,6 @@ def send_referral(message):
 @bot.message_handler(commands=["buy"])
 def handle_buy(message):
     chat_id = message.chat.id
-    # получаем регионы из БД
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT location FROM servers")
@@ -141,7 +135,7 @@ def handle_region(call):
     loc = call.data.split("_",1)[1]
     chat_id = call.message.chat.id
 
-    # сохраняем заявку
+    # Сохраняем заявку на оплату
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO payments (chat_id, plan, amount, server) VALUES (?, ?, ?, ?)",
@@ -149,7 +143,7 @@ def handle_region(call):
     conn.commit()
     conn.close()
 
-    # показываем кнопку оплаты
+    # Предлагаем оплату
     pay_markup = telebot.types.InlineKeyboardMarkup()
     pay_markup.add(telebot.types.InlineKeyboardButton("💳 Оплатить", url="https://yoomoney.ru"))
     bot.send_message(chat_id,
@@ -161,7 +155,6 @@ def confirm_payment(message):
     chat_id = str(message.chat.id)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # берём последнюю неоплаченную заявку
     c.execute("SELECT id, server FROM payments WHERE chat_id=? AND paid=0 ORDER BY created_at DESC LIMIT 1", (chat_id,))
     row = c.fetchone()
     if not row:
@@ -170,7 +163,6 @@ def confirm_payment(message):
         return
 
     pay_id, loc = row
-    # берём API URL сервера
     c.execute("SELECT api_url FROM servers WHERE location=?", (loc,))
     srv = c.fetchone()
     if not srv:
@@ -179,31 +171,29 @@ def confirm_payment(message):
         return
     api_url = srv[0]
 
-    # создаём ключ
     key = create_outline_key(api_url)
     if not key:
         bot.send_message(chat_id, "❌ Не удалось создать ключ. Попробуйте позже.")
         conn.close()
         return
 
-    # обновляем users: подписка и доступ
     sub_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     c.execute("""INSERT OR REPLACE INTO users
                  (chat_id, subscription, access_url, server, reminder_sent)
                  VALUES (?, ?, ?, ?, 0)""",
               (chat_id, sub_date, key, loc))
-    # помечаем платёж
     c.execute("UPDATE payments SET paid=1 WHERE id=?", (pay_id,))
-    # начисляем комиссию рефереру
+
+    # Начисляем комиссию рефереру
     c.execute("SELECT referrer_id FROM users WHERE chat_id=?", (chat_id,))
     ref = c.fetchone()
     if ref and ref[0]:
         comm = int(PRICE_RUB * 0.2)
         c.execute("INSERT INTO commissions (referrer_id, referee_id, amount) VALUES (?, ?, ?)",
                   (ref[0], chat_id, comm))
-        # уведомляем реферера
         bot.send_message(int(ref[0]),
                          f"🎉 Ваш реферал {chat_id} оформил подписку! Ваша комиссия: {comm}₽")
+
     conn.commit()
     conn.close()
 
@@ -234,33 +224,31 @@ async def subscription_checker():
         now = datetime.now()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        # напоминания
+        # Напоминания за 2 дня
         c.execute("SELECT chat_id, subscription, reminder_sent FROM users WHERE subscription IS NOT NULL")
         for cid, sub, sent in c.fetchall():
             try:
                 dt = datetime.strptime(sub, "%Y-%m-%d")
-                days = (dt - now).days
-                if days <= 2 and not sent:
-                    bot.send_message(cid,
-                                     f"⏳ Ваша подписка истекает {sub}. Продлите её заранее.")
+                if (dt - now).days <= 2 and not sent:
+                    bot.send_message(cid, f"⏳ Ваша подписка истекает {sub}. Продлите её заранее.")
                     c.execute("UPDATE users SET reminder_sent=1 WHERE chat_id=?", (cid,))
-            except: pass
-        # удаление просроченных
+            except:
+                pass
+        # Удаление просроченных
         c.execute("SELECT chat_id, subscription, server FROM users")
         for cid, sub, srv in c.fetchall():
             try:
                 if datetime.strptime(sub, "%Y-%m-%d") < now:
                     bot.send_message(cid, "❌ Подписка истекла, доступ отключён.")
-                    bot.send_message(ADMIN_CHAT_ID,
-                                     f"⛔ Клиент {cid} отключён от {srv} (срок истёк).")
+                    bot.send_message(ADMIN_CHAT_ID, f"⛔ Клиент {cid} отключён от {srv} (срок истёк).")
                     c.execute("DELETE FROM users WHERE chat_id=?", (cid,))
-            except: pass
+            except:
+                pass
         conn.commit()
         conn.close()
-        await asyncio.sleep(86400)  # раз в сутки
+        await asyncio.sleep(86400)
 
 async def main():
-    # старт фоновой задачи
     asyncio.create_task(subscription_checker())
     print("🚀 Бот запущен...")
     await bot.polling(non_stop=True)
