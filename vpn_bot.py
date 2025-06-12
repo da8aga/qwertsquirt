@@ -16,41 +16,48 @@ DB_PATH       = "vpn_bot.db"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- Инициализация БД ---
+# --- Инициализация и миграция БД ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # Таблица пользователей
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id TEXT UNIQUE,
-            subscription TEXT,
-            access_url TEXT,
-            server TEXT,
-            balance INTEGER DEFAULT 0,
-            referral_code TEXT,
-            referred_by TEXT,
-            reminder_sent BOOLEAN DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id        TEXT UNIQUE,
+            subscription   TEXT,
+            access_url     TEXT,
+            server         TEXT,
+            referral_code  TEXT,
+            referred_by    TEXT,
+            reminder_sent  BOOLEAN DEFAULT 0,
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     ''')
+    # Добавляем колонку balance, если она не существует
+    c.execute("PRAGMA table_info(users);")
+    cols = [r[1] for r in c.fetchall()]
+    if "balance" not in cols:
+        c.execute("ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 0;")
+    # Таблица оплат
     c.execute('''
         CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id TEXT,
-            plan TEXT,
-            amount INTEGER,
-            paid BOOLEAN DEFAULT 0,
-            server TEXT,
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id    TEXT,
+            plan       TEXT,
+            amount     INTEGER,
+            paid       BOOLEAN DEFAULT 0,
+            server     TEXT,
             access_url TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     ''')
+    # Таблица серверов
     c.execute('''
         CREATE TABLE IF NOT EXISTS servers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
             location TEXT UNIQUE,
-            api_url TEXT
+            api_url  TEXT
         );
     ''')
     conn.commit()
@@ -58,7 +65,7 @@ def init_db():
 
 init_db()
 
-# --- Вспомогательные функции ---
+# --- Вспомогательные ---
 def create_outline_key(api_url):
     try:
         r = requests.post(f"{api_url}/access-keys", verify=False, timeout=10)
@@ -68,26 +75,24 @@ def create_outline_key(api_url):
         print("Ошибка создания ключа:", e)
         return None
 
-# --- Хендлеры ---
+# --- Команды бота ---
 @bot.message_handler(commands=["start", "help"])
 def cmd_start(message):
     bot.send_message(
         message.chat.id,
         "👋 Добро пожаловать!\n"
-        "Используйте /buy для покупки VPN.\n"
-        "Ваш кабинет: /myvpn\n"
-        "Баланс: /balance\n"
-        "Вывод: /withdraw\n"
-        "Рефералка: /referral\n"
-        "Все ключи: /keys"
+        "/buy      – купить VPN\n"
+        "/myvpn    – личный кабинет\n"
+        "/keys     – список ключей\n"
+        "/balance  – баланс реферальных бонусов\n"
+        "/withdraw – запрос на вывод\n"
+        "/referral – реферальная ссылка"
     )
 
 @bot.message_handler(commands=["buy"])
 def cmd_buy(message):
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT location FROM servers")
-    rows = c.fetchall()
+    rows = conn.cursor().execute("SELECT location FROM servers").fetchall()
     conn.close()
     if not rows:
         bot.send_message(message.chat.id, "❗️ Сервера недоступны.")
@@ -98,20 +103,19 @@ def cmd_buy(message):
     bot.send_message(message.chat.id, "Выберите регион:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("region_"))
-def choose_region(call):
+def cmd_region(call):
     loc = call.data.split("_",1)[1]
     chat_id = call.message.chat.id
     text = (
         f"Вы выбрали регион: {loc}\n"
         f"💰 Цена: {PRICE_RUB}₽\n"
-        "Нажмите оплатить и затем /confirm"
+        "Нажмите кнопку «Оплатить», затем /confirm"
     )
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(telebot.types.InlineKeyboardButton("💳 Оплатить", url="https://yoomoney.ru"))
     bot.send_message(chat_id, text, reply_markup=markup)
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
+    conn.cursor().execute(
         "INSERT INTO payments (chat_id, plan, amount, server) VALUES (?,?,?,?)",
         (str(chat_id), "Месяц", PRICE_RUB, loc)
     )
@@ -145,22 +149,23 @@ def cmd_confirm(message):
         bot.send_message(message.chat.id, "Ошибка создания ключа.")
         conn.close()
         return
-    sub_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-    # сохраняем в users
+    sub = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+    # Сохраняем пользователя
     c.execute(
         "INSERT OR REPLACE INTO users (chat_id, subscription, access_url, server, reminder_sent) VALUES (?,?,?,?,0)",
-        (chat_id, sub_date, key, loc)
+        (chat_id, sub, key, loc)
     )
-    # обновляем payment
+    # Обновляем платёж
     c.execute("UPDATE payments SET paid=1, access_url=? WHERE id=?", (key, pay_id))
-    # рефералка
+    # Реферальный бонус
     c.execute("SELECT referred_by FROM users WHERE chat_id=?", (chat_id,))
     ref = c.fetchone()[0]
     if ref:
-        c.execute("UPDATE users SET balance = balance + ? WHERE chat_id=?", (int(PRICE_RUB*0.2), ref))
+        bonus = int(PRICE_RUB * 0.2)
+        c.execute("UPDATE users SET balance = balance + ? WHERE chat_id=?", (bonus, ref))
     conn.commit()
     conn.close()
-    bot.send_message(message.chat.id, f"✅ Оплачено!\n🔑 {key}", parse_mode="Markdown")
+    bot.send_message(message.chat.id, f"✅ Оплачено!\\n🔑 `{key}`", parse_mode="Markdown")
     bot.send_message(ADMIN_CHAT_ID, f"Новый клиент {chat_id}, регион {loc}")
 
 @bot.message_handler(commands=["myvpn"])
@@ -180,7 +185,7 @@ def cmd_myvpn(message):
     sub, key, loc = row
     bot.send_message(
         message.chat.id,
-        f"🌍 {loc}\n🔑 `{key}`\n⏳ до {sub}",
+        f"🌍 {loc}\\n🔑 `{key}`\\n⏳ Действует до: {sub}",
         parse_mode="Markdown"
     )
 
@@ -188,20 +193,18 @@ def cmd_myvpn(message):
 def cmd_keys(message):
     chat_id = str(message.chat.id)
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
+    rows = conn.cursor().execute(
         "SELECT access_url, server, created_at FROM payments WHERE chat_id=? AND paid=1 ORDER BY created_at DESC",
         (chat_id,)
-    )
-    all_keys = c.fetchall()
+    ).fetchall()
     conn.close()
-    if not all_keys:
-        bot.send_message(message.chat.id, "Ключей нет.")
+    if not rows:
+        bot.send_message(message.chat.id, "У вас нет ключей.")
         return
-    for key, loc, dt in all_keys:
+    for key, srv, dt in rows:
         bot.send_message(
             message.chat.id,
-            f"🌍 {loc} | 📅 {dt[:10]}\n🔑 `{key}`",
+            f"🌍 {srv} — `{key}`\\n📅 {dt[:10]}",
             parse_mode="Markdown"
         )
 
@@ -213,27 +216,25 @@ def cmd_balance(message):
     c.execute("SELECT balance FROM users WHERE chat_id=?", (chat_id,))
     bal = c.fetchone()
     conn.close()
-    bot.send_message(
-        message.chat.id,
-        f"💰 Баланс: {bal[0] if bal else 0}₽"
-    )
+    bot.send_message(message.chat.id, f"💰 Баланс: {bal[0] if bal else 0}₽")
 
 @bot.message_handler(commands=["withdraw"])
 def cmd_withdraw(message):
-    bot.send_message(message.chat.id, "Чтобы вывести, напишите администратору.")
+    bot.send_message(message.chat.id, "Чтобы вывести — напишите администратору.")
 
 @bot.message_handler(commands=["referral"])
 def cmd_referral(message):
     chat_id = str(message.chat.id)
     link = f"https://t.me/{bot.get_me().username}?start={chat_id}"
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE users SET referral_code=? WHERE chat_id=?", (chat_id, chat_id))
+    conn.cursor().execute(
+        "UPDATE users SET referral_code=? WHERE chat_id=?", (chat_id, chat_id)
+    )
     conn.commit()
     conn.close()
     bot.send_message(
         message.chat.id,
-        f"Реферальная ссылка:\n{link}\n20% бонус за каждого приглашённого!"
+        f"🎁 Реферальная ссылка:\\n{link}\\n20% бонус за каждого!"
     )
 
 async def subscription_checker():
@@ -242,14 +243,14 @@ async def subscription_checker():
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT chat_id, subscription, reminder_sent FROM users WHERE subscription IS NOT NULL")
-        for chat_id, sub, rem in c.fetchall():
+        for chat_id, sub_date, rem in c.fetchall():
             try:
-                dt = datetime.strptime(sub, "%Y-%m-%d")
+                dt = datetime.strptime(sub_date, "%Y-%m-%d")
                 if dt - now <= timedelta(days=2) and not rem:
-                    bot.send_message(chat_id, f"⏳ Подписка истекает {sub}")
+                    bot.send_message(chat_id, f"⏳ Подписка истекает {sub_date}")
                     c.execute("UPDATE users SET reminder_sent=1 WHERE chat_id=?", (chat_id,))
                 if dt < now:
-                    bot.send_message(chat_id, "❌ Подписка истекла.")
+                    bot.send_message(chat_id, "❌ Подписка завершена.")
                     c.execute("DELETE FROM users WHERE chat_id=?", (chat_id,))
             except:
                 pass
@@ -260,7 +261,7 @@ async def subscription_checker():
 async def main():
     asyncio.create_task(subscription_checker())
     print("Бот запущен")
-    await bot.polling(none_stop=True)
+    await bot.polling(non_stop=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
