@@ -6,6 +6,7 @@ import sqlite3
 import telebot
 import requests
 import asyncio
+import threading
 from datetime import datetime, timedelta
 
 # --- Конфигурация ---
@@ -15,6 +16,8 @@ PRICE_RUB     = 199
 DB_PATH       = "vpn_bot.db"
 
 bot = telebot.TeleBot(BOT_TOKEN)
+# Снимаем любой ранее установленный webhook
+bot.remove_webhook()
 
 # --- Инициализация и миграция БД ---
 def init_db():
@@ -78,27 +81,25 @@ def init_db():
 
 init_db()
 
-# --- Функция создания ключа с логированием ---
+# --- Вспомогательная функция создания ключа Outline ---
 def create_outline_key(api_url):
     url = f"{api_url}/access-keys"
-    print(f"[DEBUG] Отправляю запрос на Outline: POST {url}")
+    print(f"[DEBUG] POST {url}", flush=True)
     try:
         r = requests.post(url, verify=False, timeout=10)
-        print(f"[DEBUG] HTTP {r.status_code} {r.reason}")
-        print(f"[DEBUG] Ответ тела: {r.text}")
+        print(f"[DEBUG] HTTP {r.status_code}: {r.text}", flush=True)
         r.raise_for_status()
         data = r.json()
-        print(f"[DEBUG] Ответ JSON: {data}")
+        print(f"[DEBUG] JSON: {data}", flush=True)
         access_url = data.get("accessUrl")
         if not access_url:
-            print("[DEBUG] Поле accessUrl отсутствует или пустое")
+            print("[DEBUG] Поле accessUrl пусто или отсутствует", flush=True)
         return access_url
     except Exception as e:
-        print(f"[ERROR] Ошибка создания ключа: {e}")
+        print(f"[ERROR] Ошибка создания ключа: {e}", flush=True)
         return None
 
-# --- Хендлеры бота ---
-
+# --- /start и /help ---
 @bot.message_handler(commands=["start", "help"])
 def cmd_start(message):
     text = (
@@ -112,6 +113,7 @@ def cmd_start(message):
     )
     bot.send_message(message.chat.id, text)
 
+# --- /buy ---
 @bot.message_handler(commands=["buy"])
 def cmd_buy(message):
     conn = sqlite3.connect(DB_PATH)
@@ -125,9 +127,10 @@ def cmd_buy(message):
         markup.add(telebot.types.InlineKeyboardButton(loc, callback_data=f"region_{loc}"))
     bot.send_message(message.chat.id, "Выберите регион:", reply_markup=markup)
 
+# --- выбор региона ---
 @bot.callback_query_handler(func=lambda c: c.data.startswith("region_"))
 def cmd_region(call):
-    loc = call.data.split("_",1)[1]
+    loc = call.data.split("_", 1)[1]
     chat_id = call.message.chat.id
     text = (
         f"Вы выбрали регион: {loc}\n"
@@ -137,6 +140,7 @@ def cmd_region(call):
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(telebot.types.InlineKeyboardButton("💳 Оплатить", url="https://yoomoney.ru"))
     bot.send_message(chat_id, text, reply_markup=markup)
+
     conn = sqlite3.connect(DB_PATH)
     conn.cursor().execute(
         "INSERT INTO payments (chat_id, plan, amount, server) VALUES (?,?,?,?)",
@@ -145,6 +149,7 @@ def cmd_region(call):
     conn.commit()
     conn.close()
 
+# --- /confirm ---
 @bot.message_handler(commands=["confirm"])
 def cmd_confirm(message):
     chat_id = str(message.chat.id)
@@ -169,10 +174,11 @@ def cmd_confirm(message):
     api_url = srv[0]
     key = create_outline_key(api_url)
     if not key:
-        bot.send_message(message.chat.id, "Ошибка создания ключа. Смотрите логи на сервере.")
+        bot.send_message(message.chat.id, "Ошибка создания ключа. Смотрите логи.", parse_mode="Markdown")
         conn.close()
         return
     sub = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+
     c.execute(
         "INSERT OR REPLACE INTO users (chat_id, subscription, access_url, server, reminder_sent) VALUES (?,?,?,?,0)",
         (chat_id, sub, key, loc)
@@ -183,11 +189,14 @@ def cmd_confirm(message):
     if ref and ref[0]:
         bonus = int(PRICE_RUB * 0.2)
         c.execute("UPDATE users SET balance = balance + ? WHERE chat_id=?", (bonus, ref[0]))
+
     conn.commit()
     conn.close()
+
     bot.send_message(message.chat.id, f"✅ Оплата подтверждена!\n🔑 `{key}`", parse_mode="Markdown")
     bot.send_message(ADMIN_CHAT_ID, f"Новый клиент {chat_id}, регион {loc}")
 
+# --- /myvpn ---
 @bot.message_handler(commands=["myvpn"])
 def cmd_myvpn(message):
     chat_id = str(message.chat.id)
@@ -199,7 +208,7 @@ def cmd_myvpn(message):
     row = c.fetchone()
     conn.close()
     if not row:
-        bot.send_message(message.chat.id, "У вас пока нет активной подписки.")
+        bot.send_message(message.chat.id, "У вас пока нет подписки.")
         return
     sub, key, loc = row
     key_display = key or "—"
@@ -210,6 +219,7 @@ def cmd_myvpn(message):
     )
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
+# --- /keys ---
 @bot.message_handler(commands=["keys"])
 def cmd_keys(message):
     chat_id = str(message.chat.id)
@@ -235,6 +245,7 @@ def cmd_keys(message):
         )
         bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
+# --- /balance ---
 @bot.message_handler(commands=["balance"])
 def cmd_balance(message):
     chat_id = str(message.chat.id)
@@ -246,10 +257,12 @@ def cmd_balance(message):
     amount = bal[0] if bal else 0
     bot.send_message(message.chat.id, f"💰 Баланс: {amount}₽")
 
+# --- /withdraw ---
 @bot.message_handler(commands=["withdraw"])
 def cmd_withdraw(message):
     bot.send_message(message.chat.id, "Чтобы вывести — напишите администратору.")
 
+# --- /referral ---
 @bot.message_handler(commands=["referral"])
 def cmd_referral(message):
     chat_id = str(message.chat.id)
@@ -260,7 +273,7 @@ def cmd_referral(message):
     conn.close()
     bot.send_message(
         message.chat.id,
-        f"🎁 Ваша реферальная ссылка:\n{link}\n20% бонус за каждого!"
+        f"🎁 Реферальная ссылка:\n{link}\n20% бонус за каждого!"
     )
 
 # --- Фоновая проверка подписок ---
@@ -274,22 +287,23 @@ async def subscription_checker():
             try:
                 dt = datetime.strptime(sub_date, "%Y-%m-%d")
                 if dt - now <= timedelta(days=2) and not rem_flag:
-                    bot.send_message(chat_id, f"⏳ Ваша подписка истекает {sub_date}")
+                    bot.send_message(chat_id, f"⏳ Подписка истекает {sub_date}")
                     c.execute("UPDATE users SET reminder_sent=1 WHERE chat_id=?", (chat_id,))
                 if dt < now:
-                    bot.send_message(chat_id, "❌ Ваша подписка завершена.")
+                    bot.send_message(chat_id, "❌ Подписка завершена.")
                     c.execute("DELETE FROM users WHERE chat_id=?", (chat_id,))
-            except Exception:
+            except:
                 pass
         conn.commit()
         conn.close()
         await asyncio.sleep(86400)
 
 # --- Запуск бота ---
-async def main():
-    asyncio.create_task(subscription_checker())
-    print("Бот запущен")
-    await bot.polling(non_stop=True)
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Снимаем webhook ещё раз
+    bot.remove_webhook()
+    # Запускаем subscription_checker в фоне
+    threading.Thread(target=lambda: asyncio.run(subscription_checker()), daemon=True).start()
+    print("Бот запущен", flush=True)
+    # Запуск polling
+    bot.polling(none_stop=True)
